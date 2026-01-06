@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 
@@ -9,9 +10,9 @@ import (
 )
 
 const (
-	pingWait   = time.Second * 10
-	pongWait   = time.Second * 10
-	pingPeriod = pongWait * 9 / 10
+	pingPeriod = 15 * time.Second
+	pongWait   = 20 * time.Second
+	writeWait  = 5 * time.Second
 	bufSize    = 256
 )
 
@@ -24,10 +25,10 @@ type Hub struct {
 
 func NewHub() *Hub {
 	return &Hub{
+		clients:    make(map[*Client]bool),
 		broadcast:  make(chan []byte),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
-		clients:    make(map[*Client]bool),
 	}
 }
 
@@ -39,10 +40,7 @@ func (h *Hub) Run(ctx context.Context) {
 		case client := <-h.register:
 			h.clients[client] = true
 		case client := <-h.unregister:
-			if h.clients[client] {
-				delete(h.clients, client)
-				close(client.send)
-			}
+			h.removeClient(client)
 		case message := <-h.broadcast:
 			for client := range h.clients {
 				select {
@@ -56,60 +54,101 @@ func (h *Hub) Run(ctx context.Context) {
 }
 
 func (h *Hub) removeClient(c *Client) {
-	delete(h.clients, c)
-	close(c.send)
+	if _, ok := h.clients[c]; ok {
+		delete(h.clients, c)
+		close(c.send)
+	}
 }
 
 type Client struct {
+	hub  *Hub
 	conn *websocket.Conn
 	send chan []byte
-	hub  *Hub
 }
 
 func (c *Client) readPump(ctx context.Context) {
 	defer func() {
 		c.hub.unregister <- c
-		c.conn.Close(websocket.StatusAbnormalClosure, "bye")
+		c.conn.Close(websocket.StatusAbnormalClosure, "read error")
 	}()
 
-	c.conn.SetReadLimit(512)
+	c.conn.SetReadLimit(1024 * 64) // 64KB
+
 	for {
 		_, msg, err := c.conn.Read(ctx)
 		if err != nil {
-			if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
-				return
-			}
-			c.hub.broadcast <- msg
+			return
 		}
+		c.hub.broadcast <- msg
 	}
 }
 
 func (c *Client) writePump(ctx context.Context) {
-	ticker := time.NewTicker(pingWait)
-	defer ticker.Stop()
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.conn.Close(websocket.StatusNormalClosure, "done")
+	}()
+
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case msg, ok := <-c.send:
 			if !ok {
 				return
 			}
-
-			err := c.conn.Write(ctx, websocket.MessageText, msg)
+			writeCtx, cancel := context.WithTimeout(ctx, writeWait)
+			err := c.conn.Write(writeCtx, websocket.MessageText, msg)
+			cancel()
 			if err != nil {
 				return
 			}
 		case <-ticker.C:
-			if err := c.conn.Ping(ctx); err != nil {
+			pingCtx, cancel := context.WithTimeout(ctx, writeWait)
+			if err := c.conn.Ping(pingCtx); err != nil {
+				cancel()
 				return
 			}
+			cancel()
 		}
 	}
 }
 
-func serveHTTP(w http.ResponseWriter, r *http.Request) {
-	conn, _ := websocket.Accept(w, r, &websocket.AcceptOptions{
+func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
-	send := make(chan byte, bufSize)
-	client := &Client{conn, send}
+	if err != nil {
+		log.Println("Upgrade error:", err)
+		return
+	}
+
+	client := &Client{
+		hub:  hub,
+		conn: conn,
+		send: make(chan []byte, bufSize),
+	}
+
+	hub.register <- client
+
+	go client.writePump(r.Context())
+	go client.readPump(r.Context())
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	hub := NewHub()
+	go hub.Run(ctx)
+
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		serveWs(hub, w, r)
+	})
+
+	log.Println("Server starting on :8080")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		log.Fatal(err)
+	}
 }
