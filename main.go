@@ -204,7 +204,7 @@ func main() {
 	ctx := context.Background()
 
 	rdb := redis.NewClient(&redis.Options{
-		Addr: "0.0.0.0:6379",
+		Addr: "localhost:6379",
 	})
 
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -224,5 +224,5 @@ func main() {
 	}
 
 	log.Println("server listening on:", port)
-	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, nil))
+	log.Fatal(http.ListenAndServe("localhost:"+port, nil))
 }
