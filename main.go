@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -15,64 +20,66 @@ const (
 	bufSize    = 256
 )
 
+type Message struct {
+	ServerID string          `json:"server_id"`
+	Payload  json.RawMessage `json:"payload"`
+}
+
 type Hub struct {
-	// holds all connected clients
-	clients map[*Client]bool
-
-	// raw messages
-	broadcast chan []byte
-
-	// a new client
-	register chan *Client
-
-	// client to kill
-	unregister chan *Client
+	id      string
+	clients map[*Client]struct{}
+	mu      sync.RWMutex
+	rdb     *redis.Client
 }
 
-func NewHub() *Hub {
+func NewHub(rdb *redis.Client) *Hub {
 	return &Hub{
-		clients:    make(map[*Client]bool),
-		broadcast:  make(chan []byte),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
+		id:      uuid.NewString(),
+		clients: make(map[*Client]struct{}),
+		rdb:     rdb,
 	}
 }
 
-// runs for each client
-func (h *Hub) Run(ctx context.Context) {
-	for {
-		select {
-
-		case <-ctx.Done():
-			return
-
-		// new client, yay
-		case client := <-h.register:
-			h.clients[client] = true
-
-		// client left, sad
-		case client := <-h.unregister:
-			h.removeClient(client)
-
-		// client sent a msg
-		case message := <-h.broadcast:
-			for client := range h.clients {
-				select {
-				case client.send <- message:
-
-				// screw slow clients who can't receive a msg
-				default:
-					h.removeClient(client)
-				}
-			}
-		}
-	}
+func (h *Hub) addClient(c *Client) {
+	h.mu.Lock()
+	h.clients[c] = struct{}{}
+	h.mu.Unlock()
 }
 
 func (h *Hub) removeClient(c *Client) {
-	if ok := h.clients[c]; ok {
-		delete(h.clients, c)
-		close(c.send)
+	h.mu.Lock()
+	delete(h.clients, c)
+	h.mu.Unlock()
+	close(c.send)
+}
+
+func (h *Hub) listenToRedis(ctx context.Context) {
+	pubsub := h.rdb.Subscribe(ctx, "global_chat")
+	defer pubsub.Close()
+
+	log.Println("subscribed to redis:", h.id)
+
+	for {
+		msg, err := pubsub.ReceiveMessage(ctx)
+		if err != nil {
+			log.Println("redis receive error:", err)
+			return
+		}
+
+		var envelope Message
+		if err := json.Unmarshal([]byte(msg.Payload), &envelope); err != nil {
+			continue
+		}
+
+		h.mu.RLock()
+		for c := range h.clients {
+			select {
+			case c.send <- envelope.Payload:
+			default:
+				// slow client → drop message
+			}
+		}
+		h.mu.RUnlock()
 	}
 }
 
@@ -83,20 +90,26 @@ type Client struct {
 }
 
 func (c *Client) readPump(ctx context.Context) {
-	// unreg client from hub on err
 	defer func() {
-		c.hub.unregister <- c
+		c.hub.removeClient(c)
 		c.conn.Close(websocket.StatusAbnormalClosure, "read error")
 	}()
 
-	c.conn.SetReadLimit(64 * 2 << 10) // 64KB
-
 	for {
-		_, msg, err := c.conn.Read(ctx)
+		_, payload, err := c.conn.Read(ctx)
 		if err != nil {
 			return
 		}
-		c.hub.broadcast <- msg
+
+		msg := Message{
+			ServerID: c.hub.id,
+			Payload:  payload,
+		}
+
+		data, _ := json.Marshal(msg)
+		if err := c.hub.rdb.Publish(ctx, "global_chat", data).Err(); err != nil {
+			log.Println("redis publish error:", err)
+		}
 	}
 }
 
@@ -109,18 +122,17 @@ func (c *Client) writePump(ctx context.Context) {
 
 	for {
 		select {
-		case <-ctx.Done():
-			return
 		case msg, ok := <-c.send:
 			if !ok {
 				return
 			}
 			writeCtx, cancel := context.WithTimeout(ctx, writeWait)
-			err := c.conn.Write(writeCtx, websocket.MessageText, msg)
-			cancel()
-			if err != nil {
+			if err := c.conn.Write(writeCtx, websocket.MessageText, msg); err != nil {
+				cancel()
 				return
 			}
+			cancel()
+
 		case <-ticker.C:
 			pingCtx, cancel := context.WithTimeout(ctx, writeWait)
 			if err := c.conn.Ping(pingCtx); err != nil {
@@ -137,33 +149,45 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		log.Println("Upgrade error:", err)
 		return
 	}
 
-	client := &Client{
+	c := &Client{
 		hub:  hub,
 		conn: conn,
 		send: make(chan []byte, bufSize),
 	}
 
-	hub.register <- client
+	hub.addClient(c)
 
-	go client.writePump(r.Context())
-	go client.readPump(r.Context())
+	ctx := context.Background()
+	go c.readPump(ctx)
+	go c.writePump(ctx)
 }
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := context.Background()
 
-	hub := NewHub()
-	go hub.Run(ctx)
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+	})
+
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Fatal("redis connection failed:", err)
+	}
+
+	hub := NewHub(rdb)
+	go hub.listenToRedis(ctx)
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		serveWs(hub, w, r)
 	})
 
-	log.Println("Server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Println("server listening on:", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
