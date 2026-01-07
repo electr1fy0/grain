@@ -12,39 +12,21 @@ graph TD
         C[Client 3]
     end
 
-    subgraph Servers
+    subgraph App Servers
         S1[Go App 1]
         S2[Go App 2]
     end
 
-    subgraph Database
+    subgraph Central Datastore
         R[Redis Instance]
-        subgraph Redis Features
-            PS[Pub/Sub]
-            H[History]
-        end
     end
 
-    A -- "connects to" --> S1
-    B -- "connects to" --> S2
-    C -- "connects to" --> S1
+    A <--> S1
+    B <--> S2
+    C <--> S1
 
-    S1 -- "publishes message" --> PS
-    S2 -- "publishes message" --> PS
-
-    PS -- "delivers message" --> S1
-    PS -- "delivers message" --> S2
-
-    S1 -- "sends message" --> A
-    S1 -- "sends message" --> C
-    S2 -- "sends message" --> B
-    
-    S1 -- "sends historical messages" --> A
-    S1 -- "sends historical messages" --> C
-    S2 -- "sends historical messages" --> B
-
-    S1 -- "stores message" --> H
-    S2 -- "stores message" --> H
+    S1 <--> R
+    S2 <--> R
 ```
 
 ## Features
