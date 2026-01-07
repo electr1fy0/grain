@@ -11,15 +11,21 @@ import (
 
 const (
 	pingPeriod = 15 * time.Second
-	pongWait   = 20 * time.Second
 	writeWait  = 5 * time.Second
 	bufSize    = 256
 )
 
 type Hub struct {
-	clients    map[*Client]bool
-	broadcast  chan []byte
-	register   chan *Client
+	// holds all connected clients
+	clients map[*Client]bool
+
+	// raw messages
+	broadcast chan []byte
+
+	// a new client
+	register chan *Client
+
+	// client to kill
 	unregister chan *Client
 }
 
@@ -32,19 +38,29 @@ func NewHub() *Hub {
 	}
 }
 
+// runs for each client
 func (h *Hub) Run(ctx context.Context) {
 	for {
 		select {
+
 		case <-ctx.Done():
 			return
+
+		// new client, yay
 		case client := <-h.register:
 			h.clients[client] = true
+
+		// client left, sad
 		case client := <-h.unregister:
 			h.removeClient(client)
+
+		// client sent a msg
 		case message := <-h.broadcast:
 			for client := range h.clients {
 				select {
 				case client.send <- message:
+
+				// screw slow clients who can't receive a msg
 				default:
 					h.removeClient(client)
 				}
@@ -54,7 +70,7 @@ func (h *Hub) Run(ctx context.Context) {
 }
 
 func (h *Hub) removeClient(c *Client) {
-	if _, ok := h.clients[c]; ok {
+	if ok := h.clients[c]; ok {
 		delete(h.clients, c)
 		close(c.send)
 	}
@@ -67,12 +83,13 @@ type Client struct {
 }
 
 func (c *Client) readPump(ctx context.Context) {
+	// unreg client from hub on err
 	defer func() {
 		c.hub.unregister <- c
 		c.conn.Close(websocket.StatusAbnormalClosure, "read error")
 	}()
 
-	c.conn.SetReadLimit(1024 * 64) // 64KB
+	c.conn.SetReadLimit(64 * 2 << 10) // 64KB
 
 	for {
 		_, msg, err := c.conn.Read(ctx)
@@ -148,7 +165,5 @@ func main() {
 	})
 
 	log.Println("Server starting on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatal(err)
-	}
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
