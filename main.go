@@ -17,7 +17,7 @@ import (
 const (
 	pingPeriod = 15 * time.Second
 	writeWait  = 5 * time.Second
-	bufSize    = 256
+	bufSize    = 1024
 )
 
 type Message struct {
@@ -27,7 +27,7 @@ type Message struct {
 
 type Hub struct {
 	id      string
-	clients map[*Client]struct{}
+	clients map[*Client]bool
 	mu      sync.RWMutex
 	rdb     *redis.Client
 }
@@ -35,14 +35,14 @@ type Hub struct {
 func NewHub(rdb *redis.Client) *Hub {
 	return &Hub{
 		id:      uuid.NewString(),
-		clients: make(map[*Client]struct{}),
+		clients: make(map[*Client]bool),
 		rdb:     rdb,
 	}
 }
 
 func (h *Hub) addClient(c *Client) {
 	h.mu.Lock()
-	h.clients[c] = struct{}{}
+	h.clients[c] = true
 	h.mu.Unlock()
 }
 
@@ -76,7 +76,8 @@ func (h *Hub) listenToRedis(ctx context.Context) {
 			select {
 			case c.send <- envelope.Payload:
 			default:
-				// slow client → drop message
+				log.Printf("client behind, dropping conn")
+				close(c.send)
 			}
 		}
 		h.mu.RUnlock()
@@ -107,6 +108,14 @@ func (c *Client) readPump(ctx context.Context) {
 		}
 
 		data, _ := json.Marshal(msg)
+
+		pipe := c.hub.rdb.Pipeline()
+		pipe.LPush(ctx, "chat_history", data)
+		pipe.LTrim(ctx, "chat_history", 0, 99)
+		if _, err := pipe.Exec(ctx); err != nil {
+			log.Println("persistence err:", err)
+		}
+
 		if err := c.hub.rdb.Publish(ctx, "global_chat", data).Err(); err != nil {
 			log.Println("redis publish error:", err)
 		}
@@ -158,11 +167,21 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		send: make(chan []byte, bufSize),
 	}
 
+	ctx := r.Context()
+	history, err := hub.rdb.LRange(ctx, "chat_history", 0, -1).Result()
+	if err == nil {
+		for i := len(history) - 1; i >= 0; i-- {
+			var envelope Message
+			if err := json.Unmarshal([]byte(history[i]), &envelope); err == nil {
+				c.send <- envelope.Payload
+			}
+		}
+	}
+
 	hub.addClient(c)
 
-	ctx := context.Background()
-	go c.readPump(ctx)
-	go c.writePump(ctx)
+	go c.readPump(context.Background())
+	go c.writePump(context.Background())
 }
 
 func main() {
