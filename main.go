@@ -21,7 +21,10 @@ const (
 )
 
 type Message struct {
+	ID       string
 	ServerID string          `json:"server_id"`
+	Username string          `json:"username"`
+	Time     string          `json:"time"`
 	Payload  json.RawMessage `json:"payload"`
 }
 
@@ -73,8 +76,13 @@ func (h *Hub) listenToRedis(ctx context.Context) {
 
 		h.mu.RLock()
 		for c := range h.clients {
+			if c.id == envelope.ID {
+				continue
+			}
 			select {
-			case c.send <- envelope.Payload:
+
+			case c.send <- []byte(msg.Payload):
+
 			default:
 				log.Printf("client behind, dropping conn")
 				close(c.send)
@@ -85,12 +93,14 @@ func (h *Hub) listenToRedis(ctx context.Context) {
 }
 
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte
+	hub      *Hub
+	conn     *websocket.Conn
+	send     chan []byte
+	username string
+	id       string
 }
 
-func (c *Client) readPump(ctx context.Context) {
+func (c *Client) readPump(username string, ctx context.Context) {
 	defer func() {
 		c.hub.removeClient(c)
 		c.conn.Close(websocket.StatusAbnormalClosure, "read error")
@@ -105,6 +115,8 @@ func (c *Client) readPump(ctx context.Context) {
 		msg := Message{
 			ServerID: c.hub.id,
 			Payload:  payload,
+			Username: username,
+			ID:       c.id,
 		}
 
 		data, _ := json.Marshal(msg)
@@ -161,10 +173,14 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	username := r.URL.Query().Get("username")
+
 	c := &Client{
-		hub:  hub,
-		conn: conn,
-		send: make(chan []byte, bufSize),
+		hub:      hub,
+		conn:     conn,
+		send:     make(chan []byte, bufSize),
+		username: username,
+		id:       uuid.NewString(),
 	}
 
 	ctx := r.Context()
@@ -180,7 +196,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 	hub.addClient(c)
 
-	go c.readPump(context.Background())
+	go c.readPump(username, context.Background())
 	go c.writePump(context.Background())
 }
 
@@ -188,7 +204,7 @@ func main() {
 	ctx := context.Background()
 
 	rdb := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+		Addr: "0.0.0.0:6379",
 	})
 
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -208,5 +224,5 @@ func main() {
 	}
 
 	log.Println("server listening on:", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, nil))
 }
