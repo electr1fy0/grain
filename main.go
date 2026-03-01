@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -29,31 +29,52 @@ type Message struct {
 }
 
 type Hub struct {
-	id      string
-	clients map[*Client]bool
-	mu      sync.RWMutex
-	rdb     *redis.Client
+	id         string
+	clients    map[*Client]bool
+	register   chan *Client
+	unregister chan *Client
+	broadcast  chan []byte
+	rdb        *redis.Client
+}
+
+func (h *Hub) Run() {
+	for {
+		select {
+		case c := <-h.register:
+			h.clients[c] = true
+		case c := <-h.unregister:
+			delete(h.clients, c)
+			close(c.send)
+		case m := <-h.broadcast:
+			var envelope Message
+			if err := json.Unmarshal(m, &envelope); err != nil {
+				continue
+			}
+			for c := range h.clients {
+				if c.id == envelope.ID {
+					continue
+				}
+				select {
+				case c.send <- m:
+				default:
+					log.Printf("client behind, dropping conn")
+					close(c.send)
+					delete(h.clients, c)
+				}
+			}
+		}
+	}
 }
 
 func NewHub(rdb *redis.Client) *Hub {
 	return &Hub{
-		id:      uuid.NewString(),
-		clients: make(map[*Client]bool),
-		rdb:     rdb,
+		id:         uuid.NewString(),
+		clients:    make(map[*Client]bool),
+		register:   make(chan *Client),
+		broadcast:  make(chan []byte),
+		unregister: make(chan *Client),
+		rdb:        rdb,
 	}
-}
-
-func (h *Hub) addClient(c *Client) {
-	h.mu.Lock()
-	h.clients[c] = true
-	h.mu.Unlock()
-}
-
-func (h *Hub) removeClient(c *Client) {
-	h.mu.Lock()
-	delete(h.clients, c)
-	h.mu.Unlock()
-	close(c.send)
 }
 
 func (h *Hub) listenToRedis(ctx context.Context) {
@@ -69,26 +90,11 @@ func (h *Hub) listenToRedis(ctx context.Context) {
 			return
 		}
 
-		var envelope Message
-		if err := json.Unmarshal([]byte(msg.Payload), &envelope); err != nil {
-			continue
-		}
+		fmt.Println("msg.string():", msg.String())
+		fmt.Println("msg.payload:", msg.Payload)
 
-		h.mu.RLock()
-		for c := range h.clients {
-			if c.id == envelope.ID {
-				continue
-			}
-			select {
+		h.broadcast <- []byte(msg.Payload)
 
-			case c.send <- []byte(msg.Payload):
-
-			default:
-				log.Printf("client behind, dropping conn")
-				close(c.send)
-			}
-		}
-		h.mu.RUnlock()
 	}
 }
 
@@ -100,9 +106,11 @@ type Client struct {
 	id       string
 }
 
+// Read Payload -> Marshal to Message
+// -> Lpush History -> Trim History -> Publish
 func (c *Client) readPump(username string, ctx context.Context) {
 	defer func() {
-		c.hub.removeClient(c)
+		c.hub.unregister <- c
 		c.conn.Close(websocket.StatusAbnormalClosure, "read error")
 	}()
 
@@ -119,7 +127,10 @@ func (c *Client) readPump(username string, ctx context.Context) {
 			ID:       c.id,
 		}
 
-		data, _ := json.Marshal(msg)
+		data, err := json.Marshal(msg)
+		if err != nil {
+			log.Fatal("failed to marshal data:", err)
+		}
 
 		pipe := c.hub.rdb.Pipeline()
 		pipe.LPush(ctx, "chat_history", data)
@@ -128,16 +139,18 @@ func (c *Client) readPump(username string, ctx context.Context) {
 			log.Println("persistence err:", err)
 		}
 
+		fmt.Println("gonna publish to redis:", string(data))
 		if err := c.hub.rdb.Publish(ctx, "global_chat", data).Err(); err != nil {
 			log.Println("redis publish error:", err)
 		}
 	}
 }
 
+// Receive message to client -> Write to the conn
+// Also a ticker for ping periodic ping tests
 func (c *Client) writePump(ctx context.Context) {
-	ticker := time.NewTicker(pingPeriod)
+	tick := time.Tick(pingPeriod)
 	defer func() {
-		ticker.Stop()
 		c.conn.Close(websocket.StatusNormalClosure, "done")
 	}()
 
@@ -154,7 +167,7 @@ func (c *Client) writePump(ctx context.Context) {
 			}
 			cancel()
 
-		case <-ticker.C:
+		case <-tick:
 			pingCtx, cancel := context.WithTimeout(ctx, writeWait)
 			if err := c.conn.Ping(pingCtx); err != nil {
 				cancel()
@@ -165,6 +178,8 @@ func (c *Client) writePump(ctx context.Context) {
 	}
 }
 
+// Upgrade connection to WS -> Replay History -> Send register client msg to hub
+// Initiates read and write loops too
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
@@ -194,7 +209,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	hub.addClient(c)
+	hub.register <- c
 
 	go c.readPump(username, context.Background())
 	go c.writePump(context.Background())
@@ -212,6 +227,7 @@ func main() {
 	}
 
 	hub := NewHub(rdb)
+	go hub.Run()
 	go hub.listenToRedis(ctx)
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -223,6 +239,6 @@ func main() {
 		port = "8080"
 	}
 
-	log.Println("server listening on:", port)
-	log.Fatal(http.ListenAndServe("localhost:"+port, nil))
+	log.Println("starting the server on:", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }

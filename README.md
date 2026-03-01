@@ -34,7 +34,7 @@ graph TD
 - Real-time messaging with WebSockets.
 - Scalable architecture using Redis Pub/Sub.
 - Chat history persistence.
-- Simple and easy-to-use.
+- Simple and easy-to-set-up.
 
 ## Getting Started
 
@@ -65,13 +65,8 @@ graph TD
 
 ## Usage
 
-Connect to the WebSocket server at `ws://localhost:8080/ws?username=your-username`.
+Connect to the WebSocket server at `ws://localhost:8080/ws?username=your-username and send json messages`.
 
-You can use a WebSocket client like [wscat](https://github.com/websockets/wscat) to connect:
-
-```bash
-wscat -c "ws://localhost:8080/ws?username=your-username"
-```
 
 ## Contributing
 
