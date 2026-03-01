@@ -4,15 +4,39 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
+
+type HubManager struct {
+	Hubs []*Hub
+}
+
+func NewHubManager(rdb *redis.Client, numCpu int) *HubManager {
+	h := &HubManager{}
+	hubs := make([]*Hub, numCpu)
+
+	for i := range numCpu {
+		hubs[i] = &Hub{
+			id:         uuid.NewString(),
+			clients:    make(map[*Client]bool),
+			register:   make(chan *Client),
+			broadcast:  make(chan []byte),
+			unregister: make(chan *Client),
+			rdb:        rdb,
+		}
+	}
+	h.Hubs = hubs
+	return h
+}
 
 const (
 	pingPeriod = 15 * time.Second
@@ -63,17 +87,6 @@ func (h *Hub) Run() {
 				}
 			}
 		}
-	}
-}
-
-func NewHub(rdb *redis.Client) *Hub {
-	return &Hub{
-		id:         uuid.NewString(),
-		clients:    make(map[*Client]bool),
-		register:   make(chan *Client),
-		broadcast:  make(chan []byte),
-		unregister: make(chan *Client),
-		rdb:        rdb,
 	}
 }
 
@@ -180,7 +193,7 @@ func (c *Client) writePump(ctx context.Context) {
 
 // Upgrade connection to WS -> Replay History -> Send register client msg to hub
 // Initiates read and write loops too
-func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+func serveWs(hubManager *HubManager, w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
@@ -189,6 +202,11 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 
 	username := r.URL.Query().Get("username")
+
+	hash := fnv.New32a()
+	hash.Write([]byte(username))
+	idx := int(hash.Sum32()) % len(hubManager.Hubs)
+	hub := hubManager.Hubs[idx]
 
 	c := &Client{
 		hub:      hub,
@@ -217,7 +235,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	ctx := context.Background()
-
+	cpuCnt := runtime.NumCPU()
 	rdb := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379",
 	})
@@ -226,12 +244,15 @@ func main() {
 		log.Fatal("redis connection failed:", err)
 	}
 
-	hub := NewHub(rdb)
-	go hub.Run()
-	go hub.listenToRedis(ctx)
+	hubManager := NewHubManager(rdb, cpuCnt)
+
+	for _, hub := range hubManager.Hubs {
+		go hub.Run()
+		go hub.listenToRedis(ctx)
+	}
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWs(hub, w, r)
+		serveWs(hubManager, w, r)
 	})
 
 	port := os.Getenv("PORT")
