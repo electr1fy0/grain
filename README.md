@@ -1,77 +1,73 @@
 # Grain
 
-A simple, scalable, and real-time chat application built with Go, WebSockets, and Redis.
+Grain is a Go WebSocket chat backend that uses Redis Pub/Sub for fanout across hubs.
+
+## What It Does
+
+- Accepts WebSocket clients on `/ws`.
+- Requires a `username` query parameter.
+- Hashes usernames to pin each client to one in-process hub.
+- Publishes inbound messages to Redis channel `global_chat`.
+- Persists recent message envelopes in Redis list `chat_history` (last 100).
+- Broadcasts received messages to all connected clients except the sender.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    subgraph Clients
-        A[Client 1]
-        B[Client 2]
-        C[Client 3]
-    end
-
-    subgraph App Servers
-        S1[Go App 1]
-        S2[Go App 2]
-    end
-
-    subgraph Central Datastore
-        R[Redis Instance]
-    end
-
-    A <--> S1
-    B <--> S2
-    C <--> S1
-
-    S1 <--> R
-    S2 <--> R
+    A["WebSocket Clients"] --> B["Go Server (/ws)"]
+    B --> C["Hub per CPU core"]
+    C <--> D["Redis Pub/Sub (global_chat)"]
+    C --> E["Redis List (chat_history)"]
 ```
 
-## Features
+## Prerequisites
 
-- Real-time messaging with WebSockets.
-- Scalable architecture using Redis Pub/Sub.
-- Chat history persistence.
-- Simple and easy-to-set-up.
+- Go `1.25.5+`
+- Redis running on `localhost:6379`
 
-## Getting Started
+## Run
 
-### Prerequisites
+```bash
+go run ./cmd/grain
+```
 
-- [Go](https://golang.org/dl/)
-- [Redis](https://redis.io/download)
+Optional env vars:
 
-### Installation
+- `PORT` (default: `8080`)
 
-1.  Clone the repository:
+Server startup fails fast if Redis is unreachable.
 
-    ```bash
-    git clone https://github.com/your-username/grain.git
-    ```
+## WebSocket Contract
 
-2.  Install dependencies:
+Endpoint:
 
-    ```bash
-    go mod tidy
-    ```
+```text
+ws://localhost:8080/ws?username=<name>
+```
 
-3.  Run the application:
+- Client payload is treated as raw bytes and wrapped in a server envelope.
 
-    ```bash
-    go run main.go
-    ```
+Envelope shape sent to peers:
 
-## Usage
+```json
+{
+  "id": "client-uuid",
+  "server_id": "hub-uuid",
+  "username": "alice",
+  "payload": {}
+}
+```
 
-Connect to the WebSocket server at `ws://localhost:8080/ws?username=your-username and send json messages`.
+## Note
+Non JSON payloads are invalid.
 
+## Dependencies
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a pull request.
+- `github.com/coder/websocket`
+- `github.com/redis/go-redis/v9`
+- `github.com/google/uuid`
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT. See [LICENSE](LICENSE).
