@@ -14,11 +14,25 @@ Grain is a Go WebSocket chat backend that uses Redis Pub/Sub for fanout across h
 ## Architecture
 
 ```mermaid
-graph TD
-    A["WebSocket Clients"] --> B["Go Server (/ws)"]
-    B --> C["Hub per CPU core"]
-    C <--> D["Redis Pub/Sub (global_chat)"]
-    C --> E["Redis List (chat_history)"]
+graph BT
+    D["Redis Pub/Sub"]
+
+    S1["Go Server 1"] <--> D
+    S2["Go Server 2"] <--> D
+
+    H1["S1 Hub 1"] --> S1
+    H2["S1 Hub 2"] --> S1
+    H3["S2 Hub 1"] --> S2
+    H4["S2 Hub 2"] --> S2
+
+    C1["Client 1"] <--> H1
+    C2["Client 2"] <--> H1
+    C3["Client 3"] <--> H2
+    C4["Client 4"] <--> H2
+    C5["Client 5"] <--> H3
+    C6["Client 6"] <--> H3
+    C7["Client 7"] <--> H4
+    C8["Client 8"] <--> H4
 ```
 
 ## Prerequisites
