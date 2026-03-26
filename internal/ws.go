@@ -40,7 +40,11 @@ func (m *Manager) ServeWS(w http.ResponseWriter, r *http.Request) {
 		cancel:   cancel,
 	}
 
-	hub.register <- c
+	if ok := hub.registerClient(c); !ok {
+		cancel()
+		_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
+		return
+	}
 
 	go c.readPump(connCtx)
 	go c.writePump(connCtx)

@@ -48,7 +48,7 @@ func main() {
 	}()
 	<-ctx.Done()
 	log.Println("shutting down...")
-	stop()
+	manager.Stop()
 
 	shutDownCtx, shutDownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutDownCancel()

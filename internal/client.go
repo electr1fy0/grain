@@ -14,7 +14,7 @@ func (c *client) close(code websocket.StatusCode, reason string) {
 		if c.cancel != nil {
 			c.cancel()
 		}
-		c.hub.unregister <- c
+		c.hub.unregisterClient(c)
 		_ = c.conn.Close(code, reason)
 	})
 }
@@ -61,10 +61,13 @@ func (c *client) readPump(ctx context.Context) {
 // Tick is used for pings.
 func (c *client) writePump(ctx context.Context) {
 	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
 	defer c.close(websocket.StatusNormalClosure, "write loop closed")
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case msg, ok := <-c.send:
 			if !ok {
 				return

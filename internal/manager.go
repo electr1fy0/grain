@@ -16,6 +16,7 @@ func NewManager(rdb *redis.Client) *Manager {
 
 	for i := range numCPU {
 		hubs[i] = &hub{
+			manager:    m,
 			id:         uuid.NewString(),
 			clients:    make(map[*client]bool),
 			register:   make(chan *client, 128),
@@ -30,19 +31,30 @@ func NewManager(rdb *redis.Client) *Manager {
 }
 
 // Start launches each hub loop and Redis subscriber worker.
-func (m *Manager) Start(ctx context.Context) {
+func (m *Manager) Start(parent context.Context) {
+	if m.ctx != nil {
+		return
+	}
+
+	m.ctx, m.cancel = context.WithCancel(parent)
+
 	for _, h := range m.hubs {
 		m.wg.Add(2)
 		go func(h *hub) {
 			defer m.wg.Done()
-			go h.run(ctx)
+			h.run()
 		}(h)
 
 		go func(h *hub) {
-
 			defer m.wg.Done()
-			go h.listenToRedis(ctx)
+			h.listenToRedis()
 		}(h)
+	}
+}
+
+func (m *Manager) Stop() {
+	if m.cancel != nil {
+		m.cancel()
 	}
 }
 

@@ -10,9 +10,10 @@ import (
 )
 
 type Manager struct {
-	hubs []*hub
-	wg   sync.WaitGroup
-	ctx  context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
+	hubs   []*hub
+	wg     sync.WaitGroup
 }
 
 type Message struct {
@@ -23,6 +24,7 @@ type Message struct {
 }
 
 type hub struct {
+	manager    *Manager
 	id         string
 	clients    map[*client]bool
 	register   chan *client
