@@ -11,6 +11,8 @@ import (
 
 type Manager struct {
 	hubs []*hub
+	wg   sync.WaitGroup
+	ctx  context.Context
 }
 
 type Message struct {

@@ -60,7 +60,7 @@ func (c *client) readPump(ctx context.Context) {
 // writePump sends outbound messages to the clients ws conn.
 // Tick is used for pings.
 func (c *client) writePump(ctx context.Context) {
-	tick := time.Tick(pingPeriod)
+	ticker := time.NewTicker(pingPeriod)
 	defer c.close(websocket.StatusNormalClosure, "write loop closed")
 
 	for {
@@ -77,7 +77,7 @@ func (c *client) writePump(ctx context.Context) {
 			}
 			cancel()
 
-		case <-tick:
+		case <-ticker.C:
 			pingCtx, cancel := context.WithTimeout(ctx, writeWait)
 			if err := c.conn.Ping(pingCtx); err != nil {
 				cancel()

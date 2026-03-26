@@ -32,7 +32,20 @@ func NewManager(rdb *redis.Client) *Manager {
 // Start launches each hub loop and Redis subscriber worker.
 func (m *Manager) Start(ctx context.Context) {
 	for _, h := range m.hubs {
-		go h.run()
-		go h.listenToRedis(ctx)
+		m.wg.Add(2)
+		go func(h *hub) {
+			defer m.wg.Done()
+			go h.run(ctx)
+		}(h)
+
+		go func(h *hub) {
+
+			defer m.wg.Done()
+			go h.listenToRedis(ctx)
+		}(h)
 	}
+}
+
+func (m *Manager) Wait() {
+	m.wg.Wait()
 }

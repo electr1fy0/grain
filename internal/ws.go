@@ -30,7 +30,7 @@ func (m *Manager) ServeWS(w http.ResponseWriter, r *http.Request) {
 	idx := int(h.Sum32()) % len(m.hubs)
 	hub := m.hubs[idx]
 
-	connCtx, cancel := context.WithCancel(context.Background())
+	connCtx, cancel := context.WithCancel(m.ctx)
 	c := &client{
 		hub:      hub,
 		conn:     conn,

@@ -16,9 +16,14 @@ func (h *hub) removeClient(c *client) {
 
 // run is the single owner of hub state.
 // Listens to events from everywhere.
-func (h *hub) run() {
+func (h *hub) run(ctx context.Context) {
 	for {
 		select {
+		case <-ctx.Done():
+			for c := range h.clients {
+				h.removeClient(c)
+			}
+			return
 		case c := <-h.register:
 			h.clients[c] = true
 		case c := <-h.unregister:
